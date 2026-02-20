@@ -1,0 +1,16 @@
+.git
+.gitignore
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.DS_Store
+**/node_modules
+**/dist
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+.ai
+backend/dist
+backend/build
+frontend/.vite
