@@ -34,7 +34,7 @@ export default function DotWaveBackground({ className = '' }: DotWaveBackgroundP
       const height = canvas.clientHeight
       ctx.clearRect(0, 0, width, height)
 
-      const time = frame * 0.014
+      const time = frame * 0.007
       const amp = Math.max(16, height * 0.06)
       const centerY = height * 0.58
 
@@ -75,4 +75,3 @@ export default function DotWaveBackground({ className = '' }: DotWaveBackgroundP
 
   return <canvas ref={canvasRef} className={className} aria-hidden />
 }
-

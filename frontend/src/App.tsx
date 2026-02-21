@@ -2,8 +2,9 @@
 import Sidebar from './components/Sidebar.tsx'
 import ChatInterface from './components/ChatInterface.tsx'
 import CoverWriterMini from './components/CoverWriterMini.tsx'
-import OpsHubModal from './components/OpsHubModal.tsx'
+import OpsMiniAgent from './components/OpsMiniAgent.tsx'
 import MobileOpsCompanion from './components/MobileOpsCompanion.tsx'
+import OpsCommandCenter from './components/OpsCommandCenter.tsx'
 import CommandWelcome from './components/CommandWelcome.tsx'
 import DotWaveBackground from './components/DotWaveBackground.tsx'
 import type { Message } from './types.ts'
@@ -23,14 +24,14 @@ type ChatBundle = {
 }
 
 const HISTORY_FILES: Record<TabType, string> = {
-  main: 'Р Р°Р±РѕС‚Р° РЅР°Рґ СЃРѕР±РѕР№ 3.json',
-  chat2: 'Р Р°Р±РѕС‚Р° РЅР°Рґ СЃРѕР±РѕР№ 2.json',
-  hongkong: 'Р“РѕРЅРєРѕРЅРі_ РЎРѕРІРµС‚С‹ РїРѕ РїРѕСЃС‚СѓРїР»РµРЅРёСЋ 2026_ 2.json',
+  main: 'Работа над собой 3.json',
+  chat2: 'Работа над собой 2.json',
+  hongkong: 'Гонконг_ Советы по поступлению 2026_ 2.json',
 }
 
 const TAB_LABEL: Record<TabType, string> = {
-  main: 'Р“Р»Р°РІРЅС‹Р№',
-  chat2: 'Р Р°Р±РѕС‚Р° РЅР°Рґ СЃРѕР±РѕР№ 2',
+  main: 'Главный',
+  chat2: 'Работа над собой 2',
   hongkong: 'Hong Kong',
 }
 
@@ -105,6 +106,7 @@ function App() {
   const [activeTab, setActiveTab] = useState<TabType>('main')
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
   const [isWriterOpen, setIsWriterOpen] = useState(false)
+  const [isOpsAgentOpen, setIsOpsAgentOpen] = useState(false)
 
   const [mainChat, setMainChat] = useState<ChatBundle>(EMPTY_CHAT)
   const [chat2, setChat2] = useState<ChatBundle>(EMPTY_CHAT)
@@ -119,7 +121,12 @@ function App() {
   const [mediaResolution, setMediaResolution] = useState('Default')
   const [googleSearchEnabled, setGoogleSearchEnabled] = useState(false)
   const [codeExecutionEnabled, setCodeExecutionEnabled] = useState(false)
-  const [systemInstructions, setSystemInstructions] = useState('')
+  const [systemInstructions, setSystemInstructions] = useState(() => localStorage.getItem('ai_studio_system_instructions') || '')
+
+  useEffect(() => {
+    localStorage.setItem('ai_studio_system_instructions', systemInstructions)
+  }, [systemInstructions])
+
   const wsBase = useMemo(() => resolveWsBase(apiBase), [apiBase])
 
   const activeState = useMemo(() => {
@@ -140,6 +147,22 @@ function App() {
     setHongKongChat(prev => updater(prev))
   }
 
+  const injectOpsAgentInteraction = (userText: string, modelText: string) => {
+    const userMsg: Message = {
+      role: 'user',
+      parts: [`*(Ops Agent Command)*:\n${userText}`],
+    }
+    const modelMsg: Message = {
+      role: 'model',
+      parts: [modelText],
+    }
+    setTabState(activeTab, prev => ({
+      ...prev,
+      messages: [...prev.messages, userMsg, modelMsg],
+      tokens: prev.tokens + Math.round((userText.length + modelText.length) / 4),
+    }))
+  }
+
   useEffect(() => {
     const loadConfig = async () => {
       try {
@@ -150,11 +173,11 @@ function App() {
           setAppError('')
         } else {
           setApiKeyAvailable(false)
-          setAppError(toErrorMessage(data, 'РќРµ СѓРґР°Р»РѕСЃСЊ Р·Р°РіСЂСѓР·РёС‚СЊ РєРѕРЅС„РёРі backend'))
+          setAppError(toErrorMessage(data, 'Не удалось загрузить конфиг backend'))
         }
       } catch {
         setApiKeyAvailable(false)
-        setAppError('РќРµС‚ РїРѕРґРєР»СЋС‡РµРЅРёСЏ Рє backend. РџСЂРѕРІРµСЂСЊ, С‡С‚Рѕ desktop backend Р·Р°РїСѓС‰РµРЅ.')
+        setAppError('Нет подключения к backend. Проверь, что desktop backend запущен.')
       }
     }
 
@@ -200,7 +223,7 @@ function App() {
     }
 
     ws.onerror = () => {
-      setAppError('РЎР±РѕР№ realtime-СЃРёРЅС…СЂРѕРЅРёР·Р°С†РёРё. Р§Р°С‚ РїСЂРѕРґРѕР»Р¶РёС‚ СЂР°Р±РѕС‚Сѓ Р±РµР· live-РѕР±РЅРѕРІР»РµРЅРёР№.')
+      setAppError('Сбой realtime-синхронизации. Чат продолжит работу без live-обновлений.')
     }
 
     return () => {
@@ -226,7 +249,7 @@ function App() {
       const data = await res.json().catch(() => null)
 
       if (!res.ok) {
-        setAppError(toErrorMessage(data, 'РћС€РёР±РєР° РїСЂРё Р·Р°РіСЂСѓР·РєРµ РёСЃС‚РѕСЂРёРё'))
+        setAppError(toErrorMessage(data, 'Ошибка при загрузке истории'))
         setTabState(tab, prev => ({ ...prev, isLoading: false }))
         return
       }
@@ -243,7 +266,7 @@ function App() {
       await fetchHistory(tab, 0)
       setAppError('')
     } catch (e) {
-      setAppError(`РћС€РёР±РєР° РїРѕРґРєР»СЋС‡РµРЅРёСЏ РїСЂРё Р·Р°РіСЂСѓР·РєРµ РёСЃС‚РѕСЂРёРё: ${String(e)}`)
+      setAppError(`Ошибка подключения при загрузке истории: ${String(e)}`)
       setTabState(tab, prev => ({ ...prev, isLoading: false }))
     }
   }
@@ -257,7 +280,7 @@ function App() {
 
       if (!res.ok) {
         setTabState(tab, prev => ({ ...prev, isLoading: false }))
-        setAppError(toErrorMessage(data, 'РћС€РёР±РєР° РїСЂРё Р·Р°РіСЂСѓР·РєРµ СЃРѕРѕР±С‰РµРЅРёР№'))
+        setAppError(toErrorMessage(data, 'Ошибка при загрузке сообщений'))
         return
       }
 
@@ -272,7 +295,7 @@ function App() {
       setAppError('')
     } catch {
       setTabState(tab, prev => ({ ...prev, isLoading: false }))
-      setAppError('РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё Р·Р°РіСЂСѓР·РєРµ РёСЃС‚РѕСЂРёРё.')
+      setAppError('Сетевая ошибка при загрузке истории.')
     }
   }
 
@@ -317,7 +340,7 @@ function App() {
 
       if (!res.ok) {
         setTabState(tab, prev => ({ ...prev, isLoading: false }))
-        setAppError(toErrorMessage(data, 'РћС€РёР±РєР° Р·Р°РїСЂРѕСЃР° С‡Р°С‚Р°'))
+        setAppError(toErrorMessage(data, 'Ошибка запроса чата'))
         return
       }
 
@@ -330,7 +353,7 @@ function App() {
       setAppError('')
     } catch {
       setTabState(tab, prev => ({ ...prev, isLoading: false }))
-      setAppError('РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё РѕС‚РїСЂР°РІРєРµ СЃРѕРѕР±С‰РµРЅРёСЏ.')
+      setAppError('Сетевая ошибка при отправке сообщения.')
     }
   }
 
@@ -344,12 +367,12 @@ function App() {
 
       const data = await res.json().catch(() => null)
       if (!res.ok) {
-        setAppError(toErrorMessage(data, `РќРµ СѓРґР°Р»РѕСЃСЊ РѕС‚РєСЂС‹С‚СЊ Р»РѕРі: ${target}`))
+        setAppError(toErrorMessage(data, `Не удалось открыть лог: ${target}`))
         return
       }
       setAppError('')
     } catch {
-      setAppError(`РЎРµС‚РµРІР°СЏ РѕС€РёР±РєР° РїСЂРё РѕС‚РєСЂС‹С‚РёРё Р»РѕРіР°: ${target}.`)
+      setAppError(`Сетевая ошибка при открытии лога: ${target}.`)
     }
   }
 
@@ -386,7 +409,7 @@ function App() {
               <div className="rounded-md border border-zinc-700/80 px-2 py-1 text-[10px] uppercase tracking-[0.2em] text-zinc-300">
                 Work Boost OS
               </div>
-              <div className="hidden text-xs text-zinc-500 md:block">РћРїРµСЂР°С†РёРѕРЅРЅР°СЏ СЃРёСЃС‚РµРјР° С„СЂРёР»Р°РЅСЃР°</div>
+              <div className="hidden text-xs text-zinc-500 md:block">Операционная система фриланса</div>
             </div>
 
             <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900/90 p-1">
@@ -400,7 +423,7 @@ function App() {
                 onClick={() => setActivePage('chat')}
                 className={`rounded-md px-3 py-1.5 text-xs md:text-sm ${activePage === 'chat' ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-300 hover:bg-zinc-800'}`}
               >
-                Р§Р°С‚
+                Чат
               </button>
             </div>
 
@@ -415,19 +438,26 @@ function App() {
                 </button>
               )}
               <button
+                onClick={() => setIsOpsAgentOpen(true)}
+                className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 md:text-sm"
+                title="Открыть Ops Agent"
+              >
+                Ops Agent
+              </button>
+              <button
                 onClick={() => setIsWriterOpen(true)}
                 className="rounded-md border border-zinc-700 bg-zinc-900 px-3 py-1.5 text-xs text-zinc-200 hover:bg-zinc-800 md:text-sm"
-                title="РћС‚РєСЂС‹С‚СЊ Cover Writer"
+                title="Открыть Cover Writer"
               >
                 Writer
               </button>
               {activePage === 'chat' && (
                 <>
-                  <div className="hidden whitespace-nowrap text-xs text-zinc-400 md:block">{formatTokens(activeState.tokens)} С‚РѕРєРµРЅРѕРІ</div>
+                  <div className="hidden whitespace-nowrap text-xs text-zinc-400 md:block">{formatTokens(activeState.tokens)} токенов</div>
                   <button
                     onClick={() => setIsMobileSidebarOpen(true)}
                     className="rounded-md border border-zinc-700 bg-zinc-900 p-2 text-gray-200 lg:hidden"
-                    title="РћС‚РєСЂС‹С‚СЊ РЅР°СЃС‚СЂРѕР№РєРё С‡Р°С‚Р°"
+                    title="Открыть настройки чата"
                   >
                     <svg xmlns="http://www.w3.org/2000/svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <line x1="3" y1="6" x2="21" y2="6" />
@@ -446,7 +476,7 @@ function App() {
               <button
                 onClick={() => setAppError('')}
                 className="shrink-0 rounded px-2 py-0.5 text-red-100 hover:bg-red-500/20"
-                title="РЎРєСЂС‹С‚СЊ"
+                title="Скрыть"
               >
                 x
               </button>
@@ -454,80 +484,80 @@ function App() {
           )}
 
           <div className="min-h-0 flex-1">
-            {activePage === 'ops' ? (
-              <div className="h-full p-2 md:p-4">
-                <div className="h-full overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/92">
-                  {isPhoneViewport && opsMobileMode === 'companion' ? (
-                    <MobileOpsCompanion
-                      apiBase={apiBase}
-                      onError={setAppError}
-                      onOpenWriter={() => setIsWriterOpen(true)}
-                      onOpenChat={() => setActivePage('chat')}
-                      onOpenFullOps={() => setOpsMobileMode('full')}
-                    />
-                  ) : (
-                    <OpsHubModal embedded apiBase={apiBase} onError={setAppError} />
-                  )}
-                </div>
-              </div>
-            ) : (
-              <div className="flex h-full min-h-0">
-                <div className="m-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/92 md:m-4 md:mr-2">
-                  <header className="flex h-12 items-center justify-between border-b border-zinc-800 px-3">
-                    <div className="flex gap-1 overflow-x-auto no-scrollbar">
-                      {(Object.keys(TAB_LABEL) as TabType[]).map(tabKey => (
-                        <button
-                          key={tabKey}
-                          onClick={() => setActiveTab(tabKey)}
-                          className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors md:text-sm ${
-                            activeTab === tabKey ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-300 hover:bg-zinc-800'
-                          }`}
-                        >
-                          {TAB_LABEL[tabKey]}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="text-xs text-zinc-400">{formatTokens(activeState.tokens)} С‚РѕРєРµРЅРѕРІ</div>
-                  </header>
-                  <ChatInterface
-                    messages={activeState.messages}
-                    onSend={(text, files) => sendMessage(activeTab, text, files)}
-                    isLoading={activeState.isLoading}
-                    historyLoaded={activeState.historyLoaded}
-                    onLoadHistory={() => loadHistory(activeTab)}
-                    onLoadMore={() => fetchHistory(activeTab, activeState.offset)}
-                    hasMore={activeState.hasMore}
-                    missingApiKey={!apiKeyAvailable}
-                  />
-                </div>
-
-                <div className="mr-4 hidden lg:block">
-                  <Sidebar
-                    className="h-full rounded-2xl border border-zinc-800"
+            {/* Both views stay mounted to preserve React state (draft card statuses) */}
+            <div className={`h-full p-2 md:p-4 ${activePage !== 'ops' ? 'hidden' : ''}`}>
+              <div className="h-full overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/92">
+                {isPhoneViewport && opsMobileMode === 'companion' ? (
+                  <MobileOpsCompanion
                     apiBase={apiBase}
-                    onChangeApiBase={applyApiBase}
+                    onError={setAppError}
                     onOpenWriter={() => setIsWriterOpen(true)}
-                    onOpenOps={() => setActivePage('ops')}
-                    onOpenBackendLog={() => openLog('backend')}
-                    onOpenDesktopLog={() => openLog('desktop')}
-                    temperature={temperature}
-                    setTemperature={setTemperature}
-                    thinkingLevel={thinkingLevel}
-                    setThinkingLevel={setThinkingLevel}
-                    model={model}
-                    setModel={setModel}
-                    mediaResolution={mediaResolution}
-                    setMediaResolution={setMediaResolution}
-                    systemInstructions={systemInstructions}
-                    setSystemInstructions={setSystemInstructions}
-                    googleSearchEnabled={googleSearchEnabled}
-                    setGoogleSearchEnabled={setGoogleSearchEnabled}
-                    codeExecutionEnabled={codeExecutionEnabled}
-                    setCodeExecutionEnabled={setCodeExecutionEnabled}
+                    onOpenChat={() => setActivePage('chat')}
+                    onOpenFullOps={() => setOpsMobileMode('full')}
                   />
-                </div>
+                ) : (
+                  <OpsCommandCenter apiBase={apiBase} onError={setAppError} />
+                )}
               </div>
-            )}
+            </div>
+            <div className={`flex h-full min-h-0 ${activePage !== 'chat' ? 'hidden' : ''}`}>
+              <div className="m-2 flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-950/92 md:m-4 md:mr-2">
+                <header className="flex h-12 items-center justify-between border-b border-zinc-800 px-3">
+                  <div className="flex gap-1 overflow-x-auto no-scrollbar">
+                    {(Object.keys(TAB_LABEL) as TabType[]).map(tabKey => (
+                      <button
+                        key={tabKey}
+                        onClick={() => setActiveTab(tabKey)}
+                        className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors md:text-sm ${activeTab === tabKey ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-300 hover:bg-zinc-800'
+                          }`}
+                      >
+                        {TAB_LABEL[tabKey]}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="text-xs text-zinc-400">{formatTokens(activeState.tokens)} токенов</div>
+                </header>
+                <ChatInterface
+                  messages={activeState.messages}
+                  onSend={(text, files) => sendMessage(activeTab, text, files)}
+                  isLoading={activeState.isLoading}
+                  historyLoaded={activeState.historyLoaded}
+                  onLoadHistory={() => loadHistory(activeTab)}
+                  onLoadMore={() => fetchHistory(activeTab, activeState.offset)}
+                  hasMore={activeState.hasMore}
+                  missingApiKey={!apiKeyAvailable}
+                  apiBase={apiBase}
+                />
+              </div>
+
+              <div className="mr-4 hidden lg:block">
+                <Sidebar
+                  className="h-full rounded-2xl border border-zinc-800"
+                  apiBase={apiBase}
+                  onChangeApiBase={applyApiBase}
+                  onOpenWriter={() => setIsWriterOpen(true)}
+                  onOpenOps={() => setActivePage('ops')}
+                  onOpenOpsAgent={() => setIsOpsAgentOpen(true)}
+                  onOpenBackendLog={() => openLog('backend')}
+                  onOpenDesktopLog={() => openLog('desktop')}
+                  temperature={temperature}
+                  setTemperature={setTemperature}
+                  thinkingLevel={thinkingLevel}
+                  setThinkingLevel={setThinkingLevel}
+                  model={model}
+                  setModel={setModel}
+                  mediaResolution={mediaResolution}
+                  setMediaResolution={setMediaResolution}
+                  systemInstructions={systemInstructions}
+                  setSystemInstructions={setSystemInstructions}
+                  googleSearchEnabled={googleSearchEnabled}
+                  setGoogleSearchEnabled={setGoogleSearchEnabled}
+                  codeExecutionEnabled={codeExecutionEnabled}
+                  setCodeExecutionEnabled={setCodeExecutionEnabled}
+                />
+              </div>
+            </div>
+
           </div>
         </div>
 
@@ -547,6 +577,10 @@ function App() {
                 onOpenOps={() => {
                   setIsMobileSidebarOpen(false)
                   setActivePage('ops')
+                }}
+                onOpenOpsAgent={() => {
+                  setIsMobileSidebarOpen(false)
+                  setIsOpsAgentOpen(true)
                 }}
                 onOpenBackendLog={() => openLog('backend')}
                 onOpenDesktopLog={() => openLog('desktop')}
@@ -573,7 +607,16 @@ function App() {
           isOpen={isWriterOpen}
           onClose={() => setIsWriterOpen(false)}
           apiBase={apiBase}
-          onError={setAppError}
+          onError={msg => setAppError(msg)}
+        />
+
+        <OpsMiniAgent
+          isOpen={isOpsAgentOpen}
+          onClose={() => setIsOpsAgentOpen(false)}
+          apiBase={apiBase}
+          onError={msg => setAppError(msg)}
+          messages={activeState.messages}
+          onInjectInteraction={injectOpsAgentInteraction}
         />
       </div>
     </>

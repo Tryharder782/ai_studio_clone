@@ -10,6 +10,7 @@ interface SidebarProps {
   onCloseMobile?: () => void
   onOpenWriter: () => void
   onOpenOps: () => void
+  onOpenOpsAgent: () => void
   onOpenBackendLog: () => void
   onOpenDesktopLog: () => void
   temperature: number
@@ -35,6 +36,7 @@ export default function Sidebar({
   onCloseMobile,
   onOpenWriter,
   onOpenOps,
+  onOpenOpsAgent,
   onOpenBackendLog,
   onOpenDesktopLog,
   temperature,
@@ -254,6 +256,17 @@ export default function Sidebar({
             <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
           </svg>
           Открыть Cover Writer
+        </button>
+        <button
+          onClick={onOpenOpsAgent}
+          className="w-full bg-[#1A3A36] hover:bg-[#204944] text-[#A7F3D0] text-sm py-2 rounded-lg transition-colors flex items-center justify-center gap-2 mb-3"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+            <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"></path>
+            <polyline points="3.27 6.96 12 12.01 20.73 6.96"></polyline>
+            <line x1="12" y1="22.08" x2="12" y2="12"></line>
+          </svg>
+          Открыть Ops Agent
         </button>
         <button
           onClick={onOpenOps}

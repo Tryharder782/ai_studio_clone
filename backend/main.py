@@ -65,6 +65,8 @@ if HISTORY_FILE_DIR:
 OPS_DIR = os.path.join(HISTORY_FILE_DIR, ".ai", "ops")
 OPS_STORE_PATH = os.path.join(OPS_DIR, "phase1_store.json")
 BACKUP_DIR = os.path.join(HISTORY_FILE_DIR, ".ai", "backups")
+WORKSPACE_DIR = os.path.join(HISTORY_FILE_DIR, ".ai", "workspace")
+os.makedirs(WORKSPACE_DIR, exist_ok=True)
 PIPELINE_STAGE_ORDER = [
     "discovery",
     "qualified",
@@ -920,6 +922,334 @@ def guess_title_from_text(text_blob: str) -> str:
             continue
         return normalized
     return ""
+
+
+def extract_first_url(text_blob: str) -> str:
+    text = str(text_blob or "")
+    if not text:
+        return ""
+    match = re.search(r"https?://[^\s)\]>\"']+", text, re.IGNORECASE)
+    if not match:
+        return ""
+    return normalize_whitespace(match.group(0))
+
+
+def extract_client_hint(text_blob: str) -> str:
+    text = str(text_blob or "")
+    if not text:
+        return ""
+
+    # Common patterns from manually pasted briefs.
+    patterns = [
+        r"(?:client|company|заказчик|клиент)\s*[:\-]\s*([^\n\r,.;]{2,80})",
+        r"(?:from|от)\s+([A-ZА-Я][^\n\r,.;]{1,80})",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return truncate_text(match.group(1), 80)
+    return ""
+
+
+def parse_history_messages(raw_data: Any) -> List[Dict[str, Any]]:
+    contents: List[Any] = []
+    if isinstance(raw_data, dict):
+        if isinstance(raw_data.get("contents"), list):
+            contents = raw_data["contents"]
+        elif isinstance(raw_data.get("messages"), list):
+            contents = raw_data["messages"]
+        elif isinstance(raw_data.get("chunkedPrompt"), dict):
+            chunks = raw_data["chunkedPrompt"].get("chunks")
+            if isinstance(chunks, list):
+                contents = chunks
+    elif isinstance(raw_data, list):
+        contents = raw_data
+
+    messages: List[Dict[str, Any]] = []
+    for item in contents:
+        if not isinstance(item, dict):
+            continue
+        if isinstance(item.get("content"), dict):
+            role = normalize_whitespace(str(item.get("role") or item["content"].get("role") or "user")).lower()
+            item_parts = item["content"].get("parts", [])
+            item_timestamp = (
+                item.get("timestamp")
+                or item.get("createTime")
+                or item.get("updatedTime")
+                or item["content"].get("timestamp")
+            )
+        else:
+            role = normalize_whitespace(str(item.get("role", "user"))).lower()
+            item_parts = item.get("parts", [])
+            item_timestamp = item.get("timestamp") or item.get("createTime") or item.get("updatedTime")
+
+        if isinstance(item_parts, str):
+            item_parts = [{"text": item_parts}]
+        if not isinstance(item_parts, list):
+            item_parts = []
+
+        parts: List[str] = []
+        for part in item_parts:
+            if isinstance(part, str):
+                text = part
+            elif isinstance(part, dict):
+                text = str(part.get("text", ""))
+            else:
+                text = ""
+            text = normalize_whitespace(text)
+            if text:
+                parts.append(text)
+
+        if not parts:
+            continue
+        messages.append(
+            {
+                "role": role,
+                "parts": parts,
+                "timestamp": normalize_timestamp(item_timestamp),
+            }
+        )
+    return messages
+
+
+def resolve_history_import_path(file_path: str) -> str:
+    requested = normalize_whitespace(file_path)
+    if not requested:
+        requested = "Работа над собой 3.json"
+
+    # Absolute path takes priority.
+    if os.path.isabs(requested):
+        if os.path.exists(requested):
+            return requested
+        if os.path.exists(requested + ".synced"):
+            return requested + ".synced"
+
+    filename = os.path.basename(requested)
+    candidates = [
+        os.path.join(HISTORY_FILE_DIR, filename + ".synced"),
+        os.path.join(HISTORY_FILE_DIR, filename),
+        os.path.join(os.getcwd(), filename + ".synced"),
+        os.path.join(os.getcwd(), filename),
+    ]
+
+    # Search up to 6 parent levels from cwd as fallback.
+    probe_dir = os.getcwd()
+    for _ in range(7):
+        candidates.append(os.path.join(probe_dir, filename + ".synced"))
+        candidates.append(os.path.join(probe_dir, filename))
+        parent = os.path.dirname(probe_dir)
+        if parent == probe_dir:
+            break
+        probe_dir = parent
+
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+
+    raise FileNotFoundError(f"History file not found: {requested}")
+
+
+def should_treat_as_opportunity_candidate(text_blob: str) -> bool:
+    text = normalize_whitespace(text_blob).lower()
+    if len(text) < 80:
+        return False
+
+    positive_markers = [
+        "upwork",
+        "job",
+        "vacancy",
+        "вакан",
+        "client",
+        "клиент",
+        "budget",
+        "hourly",
+        "/hr",
+        "proposal",
+        "project",
+        "looking for",
+        "need a",
+        "ищу",
+        "нужен",
+    ]
+    if any(marker in text for marker in positive_markers):
+        return True
+
+    budget_signals = extract_budget_signals(text_blob)
+    effort_signals = extract_effort_signals(text_blob)
+    return bool(
+        budget_signals.get("fixed_max") is not None
+        or budget_signals.get("hourly_max") is not None
+        or effort_signals.get("hours_max") is not None
+    )
+
+
+def make_import_dedupe_key(title: str, client: str, job_url: str) -> str:
+    if job_url:
+        return f"url::{job_url.lower()}"
+    base = f"{title}::{client}".lower()
+    base = re.sub(r"[^a-z0-9а-яё]+", " ", base, flags=re.IGNORECASE)
+    return normalize_whitespace(base)
+
+
+def is_generic_import_title(title: str) -> bool:
+    normalized = normalize_whitespace(title).lower()
+    if not normalized:
+        return True
+    generic_tokens = {
+        "imported opportunity from chat",
+        "imported opportunity",
+        "opportunity from chat",
+        "new opportunity",
+        "новая opportunity",
+    }
+    return normalized in generic_tokens
+
+
+def derive_title_from_summary(summary: str) -> str:
+    text = normalize_whitespace(summary)
+    if not text:
+        return ""
+
+    # Try sentence-level title first.
+    sentence = re.split(r"[.!?]\s+", text)[0].strip()
+    if 10 <= len(sentence) <= 160:
+        return truncate_text(sentence, 160)
+
+    # Fallback: first 16 words.
+    words = text.split(" ")
+    candidate = " ".join(words[:16]).strip()
+    return truncate_text(candidate, 160)
+
+
+def summary_fingerprint(summary: str) -> str:
+    normalized = normalize_whitespace(summary).lower()
+    normalized = re.sub(r"https?://\S+", " ", normalized)
+    normalized = re.sub(r"[^a-z0-9а-яё]+", " ", normalized, flags=re.IGNORECASE)
+    normalized = normalize_whitespace(normalized)
+    if not normalized:
+        return ""
+    words = normalized.split(" ")
+    return " ".join(words[:20])
+
+
+def merge_opportunity_records(primary: Dict[str, Any], secondary: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(primary)
+
+    scalar_fields = [
+        "client",
+        "job_url",
+        "summary",
+        "notes",
+        "platform",
+        "expected_revenue_usd",
+        "estimated_hours",
+        "actual_revenue_usd",
+        "actual_hours",
+        "probability_percent",
+    ]
+    for field in scalar_fields:
+        primary_value = merged.get(field)
+        secondary_value = secondary.get(field)
+
+        if (primary_value is None or primary_value == "") and secondary_value not in {None, ""}:
+            merged[field] = secondary_value
+            continue
+
+        # For notes/summary keep richer text.
+        if field in {"summary", "notes"} and isinstance(primary_value, str) and isinstance(secondary_value, str):
+            if len(secondary_value.strip()) > len(primary_value.strip()):
+                merged[field] = secondary_value
+
+    merged["tags"] = normalize_string_list((primary.get("tags") or []) + (secondary.get("tags") or []))
+    merged["updated_at"] = now_iso()
+    return merged
+
+
+def imported_opportunity_signal_score(item: Dict[str, Any]) -> int:
+    title = normalize_whitespace(str(item.get("title", ""))).lower()
+    summary = normalize_whitespace(str(item.get("summary", ""))).lower()
+    text = f"{title} {summary}"
+    score = 0
+
+    positive_keywords = [
+        "upwork", "job", "vacancy", "вакан", "client", "клиент",
+        "full-stack", "frontend", "backend", "developer", "engineer",
+        "react", "next.js", "typescript", "python", "fastapi", "webgl", "three.js",
+        "proposal", "hourly", "fixed price", "budget", "project", "looking for", "need",
+    ]
+    negative_keywords = [
+        "давай", "что думаешь", "я не понимаю", "вот ответ", "напомнить",
+        "вырубаюсь", "переговор", "отправил", "проиграли", "хо-хе", "пиздец",
+        "как думаешь", "объясни", "с таким отзывом",
+    ]
+
+    for keyword in positive_keywords:
+        if keyword in text:
+            score += 1
+    for keyword in negative_keywords:
+        if keyword in text:
+            score -= 2
+
+    if normalize_whitespace(str(item.get("job_url", ""))):
+        score += 3
+    if parse_number(item.get("expected_revenue_usd")) is not None:
+        score += 2
+    if parse_number(item.get("estimated_hours")) is not None:
+        score += 1
+    return score
+
+
+def is_strong_opportunity_item(item: Dict[str, Any]) -> bool:
+    title = normalize_whitespace(str(item.get("title", ""))).lower()
+    summary = normalize_whitespace(str(item.get("summary", ""))).lower()
+    text = f"{title} {summary}"
+    job_url = normalize_whitespace(str(item.get("job_url", "")))
+
+    if job_url:
+        return True
+
+    strong_markers = [
+        "upwork",
+        "job",
+        "vacancy",
+        "вакан",
+        "full-stack",
+        "frontend",
+        "backend",
+        "developer",
+        "looking for",
+        "need a",
+        "proposal",
+        "cover letter",
+    ]
+    starts_with_noise = (
+        "давай",
+        "как ",
+        "ты уверен",
+        "а нельзя",
+        "ну ",
+        "я ",
+        "сделано",
+        "вообще-то",
+        "он:",
+    )
+
+    if any(title.startswith(prefix) for prefix in starts_with_noise):
+        return False
+
+    marker_hits = sum(1 for marker in strong_markers if marker in text)
+    if marker_hits >= 2:
+        return True
+
+    # Alternative accept path: explicit monetary/time signal plus one strong marker.
+    has_budget_or_hours = (
+        parse_number(item.get("expected_revenue_usd")) is not None
+        or parse_number(item.get("estimated_hours")) is not None
+    )
+    if has_budget_or_hours and marker_hits >= 1:
+        return True
+
+    return False
 
 
 def default_scoring_profile() -> Dict[str, Any]:
@@ -2877,6 +3207,135 @@ def build_phase1_payload(store: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def build_ops_context_summary() -> str:
+    """Build a compact text summary of Ops Hub state for injection into AI prompts.
+
+    Returns ~100-150 tokens of aggregated numbers and key signals.
+    Returns empty string if ops store doesn't exist or is empty.
+    """
+    try:
+        store = ensure_ops_store()
+    except Exception:
+        return ""
+
+    opportunities = [item for item in store.get("opportunities", []) if isinstance(item, dict)]
+    if not opportunities:
+        return ""
+
+    metrics = compute_phase1_metrics(store)
+    execution_projects = [item for item in store.get("execution_projects", []) if isinstance(item, dict)]
+    playbooks = [item for item in store.get("playbooks", []) if isinstance(item, dict)]
+    scoring_profile = merge_scoring_profile(store.get("scoring_profile", {}))
+    target = store.get("success_targets", {})
+
+    # Stage distribution (only non-zero)
+    stage_counts: Dict[str, int] = {}
+    for opp in opportunities:
+        stage = normalize_pipeline_stage(opp.get("stage"))
+        if stage not in TERMINAL_PIPELINE_STAGES:
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+    stage_parts = [f"{stage}({count})" for stage, count in sorted(stage_counts.items(), key=lambda x: -x[1]) if count > 0]
+
+    # Delivery summary
+    active_projects = [p for p in execution_projects if normalize_whitespace(str(p.get("status", ""))).lower() in ("active", "in_progress")]
+    blocked_projects = [p for p in execution_projects if normalize_whitespace(str(p.get("status", ""))).lower() == "blocked"]
+    at_risk_projects = [p for p in execution_projects if normalize_whitespace(str(p.get("status", ""))).lower() == "at_risk"]
+
+    # Active playbooks (top 3 by priority)
+    active_playbooks = sorted(
+        [p for p in playbooks if p.get("active", True)],
+        key=lambda p: int(parse_number(p.get("priority")) or 50),
+        reverse=True,
+    )[:3]
+    playbook_names = [f'"{truncate_text(str(p.get("title", "")), 30)}"' for p in active_playbooks]
+
+    # Scoring keywords (compact)
+    preferred_kw = scoring_profile.get("preferred_keywords", [])[:5]
+    risk_kw = scoring_profile.get("risk_keywords", [])[:3]
+
+    # Build summary lines
+    lines = ["[OPS CONTEXT — live data from your Ops Hub]"]
+
+    # Pipeline
+    open_count = metrics.get("open_opportunity_count", 0)
+    won_count = metrics.get("won_count", 0)
+    win_rate = metrics.get("win_rate_percent", 0)
+    eff_h = metrics.get("effective_hourly_realized_usd")
+    pipeline_eff_h = metrics.get("effective_hourly_estimated_pipeline_usd")
+    lines.append(
+        f"Pipeline: {open_count} open, {won_count} won, win_rate {win_rate}%"
+        + (f", eff/h ${eff_h:.0f}" if eff_h else "")
+        + (f", pipeline_eff/h ${pipeline_eff_h:.0f}" if pipeline_eff_h else "")
+    )
+
+    # Stages
+    if stage_parts:
+        lines.append(f"Stages: {', '.join(stage_parts)}")
+
+    # Active Opportunities (Crucial for AI to know exact IDs and Titles)
+    active_opps = [o for o in opportunities if normalize_pipeline_stage(o.get("stage")) not in TERMINAL_PIPELINE_STAGES]
+    active_opps.sort(key=lambda x: str(x.get("updated_at", "")), reverse=True)
+    if active_opps:
+        lines.append("\nActive Opportunities (Use these exact IDs when proposing updates):")
+        for opp in active_opps[:20]:
+            opp_id = opp.get("id", "")
+            title = truncate_text(str(opp.get("title", "")), 40)
+            stage = opp.get("stage", "discovery")
+            lines.append(f"- ID: {opp_id} | Title: {title} | Stage: {stage}")
+
+    # Targets
+    min_hourly = parse_number(target.get("effective_hourly_min_usd"))
+    min_win_rate = parse_number(target.get("win_rate_min_percent"))
+    if min_hourly or min_win_rate:
+        target_parts = []
+        if min_hourly:
+            target_parts.append(f"min_hourly ${min_hourly:.0f}")
+        if min_win_rate:
+            target_parts.append(f"min_win_rate {min_win_rate:.0f}%")
+        lines.append(f"Targets: {', '.join(target_parts)}")
+
+    # Delivery
+    if execution_projects:
+        lines.append(
+            f"Delivery: {len(active_projects)} active, {len(blocked_projects)} blocked, {len(at_risk_projects)} at_risk"
+        )
+
+    # Playbooks
+    if playbook_names:
+        lines.append(f"Top playbooks: {', '.join(playbook_names)}")
+
+    # Scoring keywords
+    if preferred_kw:
+        lines.append(f"Preferred keywords: {', '.join(preferred_kw[:5])}")
+    if risk_kw:
+        lines.append(f"Risk keywords: {', '.join(risk_kw[:3])}")
+
+    # Tool usage instructions — MUST be forceful so the model actually calls tools
+    lines.append(
+        "\n[CRITICAL: DRAFT & CONFIRM TOOLS — YOU MUST USE THESE]\n"
+        "You have propose_ function tools. You MUST call them. DO NOT just describe data in text.\n"
+        "\n"
+        "Available tools:\n"
+        "- propose_opportunity(title, client, stage, url, estimated_revenue, estimated_hours, actual_revenue, actual_hours, summary, notes, platform)\n"
+        "- propose_stage_update(opportunity_id, title, new_stage, reason)\n"
+        "- propose_opportunity_update(opportunity_id, title, updates)\n"
+        "- propose_postmortem(opportunity_id, title, outcome, findings, what_worked, root_causes, lessons)\n"
+        "- propose_execution_project(opportunity_id, title, client, milestones, planned_hours, planned_revenue_usd)\n"
+        "\n"
+        "MANDATORY RULES:\n"
+        "1. When adding NEW or ONGOING projects — call propose_opportunity(stage='discovery' or 'negotiation' etc).\n"
+        "2. When importing PAST/COMPLETED contracts — call propose_opportunity() AND SET stage='won' (or 'lost'), and fill actual_revenue and actual_hours. Do NOT create as discovery and move it later.\n"
+        "3. NEVER say 'скопируй', 'занеси вручную', 'добавь сам'. You have the tools — USE THEM.\n"
+        "4. When user says an existing project was won/lost — call propose_stage_update(), then call propose_postmortem() and propose_execution_project().\n"
+        "5. When user updates budget/hours/details of an existing project — call propose_opportunity_update().\n"
+        "6. Always omit opportunity_id if unknown.\n"
+        "7. The user will see a UI card and click Confirm/Cancel. You never write to the database directly.\n"
+        "8. You may add a brief sentence before each tool call explaining what you found, but the TOOL CALL IS MANDATORY."
+    )
+
+    return "\n".join(lines)
+
+
 def delete_record_by_id(store: Dict[str, Any], collection_key: str, record_id: str) -> bool:
     records = store.get(collection_key, [])
     if not isinstance(records, list):
@@ -3642,7 +4101,9 @@ async def load_history(data: dict):
     logger.info("Initializing chat session with %s historical messages", len(history_context))
     
     model_name = data.get("model", "gemini-3.1-pro-preview") if isinstance(data, dict) else "gemini-3.1-pro-preview"
-    chat_session = client.chats.create(model=model_name, history=history_context)
+    # Do NOT create the chat session here — /api/chat will create it with
+    # the full tool set (propose_opportunity, etc.) on first message.
+    chat_session = None
     current_model_name = model_name
     
     return {"status": "success", "file": target_path, "total_messages": len(current_history), "total_tokens": total_tokens}
@@ -3772,6 +4233,34 @@ async def get_history(offset: int = 0, limit: int = 20):
         "total": total,
         "total_tokens": total_tokens
     }
+@app.post("/api/workspace/init")
+async def init_workspace(data: dict):
+    project_id = normalize_whitespace(str(data.get("project_id", "default")))
+    project_dir = os.path.join(WORKSPACE_DIR, project_id)
+    os.makedirs(project_dir, exist_ok=True)
+    return {"status": "success", "workspace_dir": project_dir}
+
+
+@app.get("/api/workspace/status")
+async def check_workspace_status(project_id: str = "default"):
+    project_id = normalize_whitespace(project_id)
+    if not project_id:
+        project_id = "default"
+    project_dir = os.path.join(WORKSPACE_DIR, project_id)
+    
+    brief_path = os.path.join(project_dir, "task_brief.md")
+    report_path = os.path.join(project_dir, "execution_report.md")
+    
+    has_brief = os.path.exists(brief_path)
+    has_report = os.path.exists(report_path)
+    
+    if has_report:
+        return {"status": "report_ready", "has_brief": has_brief, "has_report": True}
+    elif has_brief:
+        return {"status": "working", "has_brief": True, "has_report": False}
+        
+    return {"status": "idle", "has_brief": False, "has_report": False}
+
 
 
 @app.get("/api/ops/phase1")
@@ -4273,7 +4762,15 @@ async def upsert_opportunity(data: dict):
     if not isinstance(opportunities, list):
         opportunities = []
 
-    record_id = normalize_whitespace(str(data.get("id", ""))) or str(uuid.uuid4())
+    record_id = normalize_whitespace(str(data.get("id", "")))
+    # If no ID provided, try to find existing opportunity by title before creating new
+    if not record_id:
+        title_lower = title.lower()
+        existing_by_title = next((item for item in opportunities if title_lower in str(item.get("title", "")).lower()), None)
+        if existing_by_title:
+            record_id = str(existing_by_title.get("id"))
+        else:
+            record_id = str(uuid.uuid4())
     stage = normalize_pipeline_stage(data.get("stage", "discovery"))
     now = now_iso()
 
@@ -4324,14 +4821,19 @@ async def upsert_opportunity(data: dict):
 @app.post("/api/ops/opportunity/stage")
 async def update_opportunity_stage(data: dict):
     record_id = normalize_whitespace(str(data.get("id", "")))
-    if not record_id:
-        raise HTTPException(status_code=400, detail="id is required")
-
+    title_hint = normalize_whitespace(str(data.get("title", "")))
     next_stage = normalize_pipeline_stage(data.get("stage", "discovery"))
+
     store = ensure_ops_store()
     opportunities = store.get("opportunities", [])
 
-    target = next((item for item in opportunities if str(item.get("id")) == record_id), None)
+    target = None
+    if record_id:
+        target = next((item for item in opportunities if str(item.get("id")) == record_id), None)
+    # Fallback: resolve by title when AI omits the ID
+    if not target and title_hint:
+        title_lower = title_hint.lower()
+        target = next((item for item in opportunities if title_lower in str(item.get("title", "")).lower()), None)
     if not target:
         raise HTTPException(status_code=404, detail="Opportunity not found")
 
@@ -4361,6 +4863,271 @@ async def delete_opportunity(data: dict):
 
     save_ops_store(store)
     return build_phase1_payload(store)
+
+
+@app.post("/api/ops/opportunity/import_history")
+async def import_opportunities_from_history(data: dict):
+    history_file_path = normalize_whitespace(str(data.get("history_file_path", "Работа над собой 3.json")))
+    max_items = int(parse_number(data.get("max_items")) or 120)
+    max_items = max(10, min(max_items, 500))
+    dry_run = parse_bool(data.get("dry_run"), default=False)
+
+    try:
+        target_path = resolve_history_import_path(history_file_path)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        with open(target_path, "r", encoding="utf-8") as file_ref:
+            raw_history = json.load(file_ref)
+    except Exception as e:
+        error_id = log_exception(f"import_history read failed: {target_path}", e)
+        raise HTTPException(status_code=500, detail=to_user_error("Cannot read history file", error_id))
+
+    messages = parse_history_messages(raw_history)
+    if not messages:
+        raise HTTPException(status_code=400, detail="No parsable messages found in history file.")
+
+    store = ensure_ops_store()
+    opportunities = store.get("opportunities", [])
+    if not isinstance(opportunities, list):
+        opportunities = []
+    profile = merge_scoring_profile(store.get("scoring_profile", {}))
+
+    existing_keys = set()
+    for item in opportunities:
+        if not isinstance(item, dict):
+            continue
+        key = make_import_dedupe_key(
+            title=normalize_whitespace(str(item.get("title", ""))),
+            client=normalize_whitespace(str(item.get("client", ""))),
+            job_url=normalize_whitespace(str(item.get("job_url", ""))),
+        )
+        if key:
+            existing_keys.add(key)
+
+    created = 0
+    skipped = 0
+    candidates_seen = 0
+    skipped_reasons: Dict[str, int] = {
+        "non_candidate": 0,
+        "duplicate": 0,
+        "missing_title": 0,
+        "limit_reached": 0,
+    }
+    now = now_iso()
+
+    # Walk from newer to older so we import recent opportunities first.
+    for msg in reversed(messages):
+        if created >= max_items:
+            skipped_reasons["limit_reached"] += 1
+            break
+
+        role = normalize_whitespace(str(msg.get("role", ""))).lower()
+        if role not in {"user", "human"}:
+            continue
+
+        parts = msg.get("parts", [])
+        text_blob = "\n".join(str(part) for part in parts if isinstance(part, str))
+        text_blob = normalize_whitespace(text_blob)
+        if not text_blob:
+            continue
+
+        if not should_treat_as_opportunity_candidate(text_blob):
+            skipped_reasons["non_candidate"] += 1
+            continue
+        candidates_seen += 1
+
+        title = guess_title_from_text(text_blob)
+        if not title:
+            title = "Imported opportunity from chat"
+        title = truncate_text(title, 160)
+        if not title:
+            skipped += 1
+            skipped_reasons["missing_title"] += 1
+            continue
+
+        job_url = extract_first_url(text_blob)
+        client_name = extract_client_hint(text_blob)
+
+        dedupe_key = make_import_dedupe_key(title=title, client=client_name, job_url=job_url)
+        if dedupe_key in existing_keys:
+            skipped += 1
+            skipped_reasons["duplicate"] += 1
+            continue
+
+        budget_signals = extract_budget_signals(text_blob)
+        effort_signals = extract_effort_signals(text_blob)
+
+        expected_revenue = parse_number(budget_signals.get("fixed_max"))
+        estimated_hours = parse_number(effort_signals.get("hours_max"))
+        hourly_from_text = parse_number(budget_signals.get("hourly_max"))
+        if expected_revenue is None and hourly_from_text is not None and estimated_hours and estimated_hours > 0:
+            expected_revenue = round(hourly_from_text * estimated_hours, 2)
+
+        estimated_hourly = None
+        if expected_revenue is not None and estimated_hours and estimated_hours > 0:
+            estimated_hourly = expected_revenue / estimated_hours
+
+        intake_gate = evaluate_intake_gate(
+            text_blob=text_blob,
+            expected_revenue_usd=expected_revenue,
+            estimated_hourly_usd=estimated_hourly,
+            scoring_profile=profile,
+        )
+        signals = normalize_autofill_labels(
+            list(intake_gate.get("hard_reject_hits", []))
+            + list(intake_gate.get("heavy_penalty_hits", []))
+            + list(intake_gate.get("risk_marker_hits", []))
+            + list(intake_gate.get("reasons", [])),
+            limit=10,
+        )
+
+        imported_item = {
+            "id": str(uuid.uuid4()),
+            "title": title,
+            "client": client_name,
+            "platform": "Upwork",
+            "stage": "discovery",
+            "job_url": job_url,
+            "summary": truncate_text(text_blob, 280),
+            "notes": truncate_text(
+                f"Imported from chat history ({os.path.basename(target_path)}) at {now}.",
+                280,
+            ),
+            "expected_revenue_usd": round(expected_revenue, 2) if expected_revenue is not None else None,
+            "estimated_hours": round(estimated_hours, 2) if estimated_hours is not None else None,
+            "actual_revenue_usd": None,
+            "actual_hours": None,
+            "probability_percent": None,
+            "tags": ["imported", "chat_history"] + signals[:3],
+            "created_at": now,
+            "updated_at": now,
+        }
+
+        opportunities.append(imported_item)
+        existing_keys.add(dedupe_key)
+        created += 1
+
+    if not dry_run:
+        store["opportunities"] = opportunities
+        save_ops_store(store)
+
+    payload = build_phase1_payload(store if not dry_run else {**store, "opportunities": opportunities})
+    return {
+        "status": "success",
+        "import_report": {
+            "history_file": target_path,
+            "messages_total": len(messages),
+            "candidates_seen": candidates_seen,
+            "created": created,
+            "skipped": skipped + skipped_reasons.get("non_candidate", 0),
+            "skipped_reasons": skipped_reasons,
+            "dry_run": dry_run,
+        },
+        "payload": payload,
+    }
+
+
+@app.post("/api/ops/opportunity/postprocess_imported")
+async def postprocess_imported_opportunities(data: dict):
+    dry_run = parse_bool(data.get("dry_run"), default=False)
+    prune_noise = parse_bool(data.get("prune_noise"), default=True)
+
+    store = ensure_ops_store()
+    opportunities = store.get("opportunities", [])
+    if not isinstance(opportunities, list):
+        opportunities = []
+
+    renamed = 0
+    merged_count = 0
+    imported_count = 0
+    noise_pruned = 0
+
+    # 1) Improve generic titles for imported cards.
+    normalized_items: List[Dict[str, Any]] = []
+    for raw_item in opportunities:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        tags = normalize_string_list(item.get("tags", []))
+        is_imported = "imported" in {tag.lower() for tag in tags} or "chat_history" in {tag.lower() for tag in tags}
+        if is_imported:
+            imported_count += 1
+            current_title = normalize_whitespace(str(item.get("title", "")))
+            if is_generic_import_title(current_title):
+                candidate_title = derive_title_from_summary(str(item.get("summary", "")))
+                if candidate_title:
+                    item["title"] = candidate_title
+                    item["updated_at"] = now_iso()
+                    renamed += 1
+        normalized_items.append(item)
+
+    # 2) Merge near-duplicate imported cards.
+    dedupe_map: Dict[str, Dict[str, Any]] = {}
+    dedupe_order: List[str] = []
+    for item in normalized_items:
+        tags = normalize_string_list(item.get("tags", []))
+        is_imported = "imported" in {tag.lower() for tag in tags} or "chat_history" in {tag.lower() for tag in tags}
+
+        if not is_imported:
+            key = f"id::{item.get('id')}"
+        else:
+            job_url = normalize_whitespace(str(item.get("job_url", "")))
+            if job_url:
+                key = f"url::{job_url.lower()}"
+            else:
+                fp = summary_fingerprint(str(item.get("summary", "")))
+                client = normalize_whitespace(str(item.get("client", ""))).lower()
+                title = normalize_whitespace(str(item.get("title", ""))).lower()
+                key = f"fp::{fp}::{client or title}"
+
+        existing = dedupe_map.get(key)
+        if not existing:
+            dedupe_map[key] = item
+            dedupe_order.append(key)
+        else:
+            dedupe_map[key] = merge_opportunity_records(existing, item)
+            merged_count += 1
+
+    final_opportunities = [dedupe_map[key] for key in dedupe_order]
+
+    # 3) Optionally prune obviously non-opportunity imported cards.
+    if prune_noise:
+        cleaned: List[Dict[str, Any]] = []
+        for item in final_opportunities:
+            tags = normalize_string_list(item.get("tags", []))
+            is_imported = "imported" in {tag.lower() for tag in tags} or "chat_history" in {tag.lower() for tag in tags}
+            if not is_imported:
+                cleaned.append(item)
+                continue
+            score = imported_opportunity_signal_score(item)
+            if score < 1 or not is_strong_opportunity_item(item):
+                noise_pruned += 1
+                continue
+            cleaned.append(item)
+        final_opportunities = cleaned
+
+    if not dry_run:
+        store["opportunities"] = final_opportunities
+        save_ops_store(store)
+
+    payload_store = store if not dry_run else {**store, "opportunities": final_opportunities}
+    payload = build_phase1_payload(payload_store)
+    return {
+        "status": "success",
+        "postprocess_report": {
+            "imported_seen": imported_count,
+            "renamed": renamed,
+            "merged": merged_count,
+            "removed_duplicates": merged_count,
+            "noise_pruned": noise_pruned,
+            "final_total": len(final_opportunities),
+            "prune_noise": prune_noise,
+            "dry_run": dry_run,
+        },
+        "payload": payload,
+    }
 
 
 @app.post("/api/ops/execution_bridge/from_opportunity")
@@ -4994,9 +5761,15 @@ async def cover_writer(data: dict):
         latest_turns_count=latest_turns_count,
     )
 
+    ops_context = build_ops_context_summary()
+    ops_block = f"\n\n{ops_context}\n" if ops_context else ""
+
     prompt = (
         "You are CoverLetterWriter. Your only responsibility is writing and revising cover letters.\n"
         "Never invent facts. Use only the context packet.\n"
+        "Use the OPS CONTEXT below to tailor cover letters: reference relevant skills from preferred_keywords, "
+        "avoid risk_keywords, and leverage playbook strategies when applicable.\n"
+        f"{ops_block}"
         f"Mode: {mode}\n"
         f"User instruction: {instruction}\n\n"
         "Context packet (JSON):\n"
@@ -5032,6 +5805,244 @@ async def cover_writer(data: dict):
     except Exception as e:
         error_id = log_exception("cover_writer failed", e)
         raise HTTPException(status_code=500, detail=to_user_error("Cover writer request failed", error_id))
+
+
+def get_all_draft_tools():
+    propose_opportunity_decl = types.FunctionDeclaration(
+        name="propose_opportunity",
+        description=(
+            "Propose creating a new opportunity card in the user's Ops Hub pipeline. "
+            "Call this for new job postings, vacancies, AND for importing historical/completed contracts. "
+            "Set 'stage' to the correct pipeline stage: discovery, qualified, proposal, interview, negotiation, waiting_offer, offer_received, blocked, active, won, upsell, lost. "
+            "For completed/won contracts, set stage='won' and fill actual_revenue and actual_hours. "
+            "For lost contracts, set stage='lost'. "
+            "You are ONLY proposing — the user will confirm or reject in the UI."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "title": types.Schema(type="STRING", description="Short descriptive title of the opportunity"),
+                "client": types.Schema(type="STRING", description="Client or company name if mentioned"),
+                "stage": types.Schema(type="STRING", description="Pipeline stage: discovery, qualified, proposal, interview, negotiation, waiting_offer, offer_received, blocked, active, won, upsell, lost. Default: discovery"),
+                "url": types.Schema(type="STRING", description="Job posting URL if available"),
+                "estimated_revenue": types.Schema(type="NUMBER", description="Estimated total revenue in USD"),
+                "estimated_hours": types.Schema(type="NUMBER", description="Estimated hours to complete"),
+                "actual_revenue": types.Schema(type="NUMBER", description="Actual revenue earned (for completed contracts)"),
+                "actual_hours": types.Schema(type="NUMBER", description="Actual hours spent (for completed contracts)"),
+                "summary": types.Schema(type="STRING", description="1-2 sentence summary of the opportunity"),
+                "notes": types.Schema(type="STRING", description="Additional notes, context, or feedback"),
+                "platform": types.Schema(type="STRING", description="Platform: Upwork, Direct, Referral, etc."),
+            },
+            required=["title"],
+        ),
+    )
+    propose_stage_update_decl = types.FunctionDeclaration(
+        name="propose_stage_update",
+        description=(
+            "Propose moving an existing opportunity to a different pipeline stage. "
+            "Call this when the user says things like 'we won project X', 'move Y to proposal', 'waiting for offer', 'we lost this one', 'renegotiating'. "
+            "Stages: discovery, qualified, proposal, interview, negotiation, waiting_offer, offer_received, blocked, active, won, upsell, lost. "
+            "You are ONLY proposing — the user will confirm or reject in the UI."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "opportunity_id": types.Schema(type="STRING", description="ID of the opportunity to update"),
+                "title": types.Schema(type="STRING", description="Title of the opportunity (for display)"),
+                "new_stage": types.Schema(type="STRING", description="New pipeline stage: discovery, qualified, proposal, interview, negotiation, waiting_offer, offer_received, blocked, active, won, upsell, lost"),
+                "reason": types.Schema(type="STRING", description="Brief reason for the stage change"),
+            },
+            required=["opportunity_id", "title", "new_stage"],
+        ),
+    )
+    propose_opportunity_update_decl = types.FunctionDeclaration(
+        name="propose_opportunity_update",
+        description=(
+            "Propose updating fields on an existing opportunity (revenue, hours, notes, summary, client). "
+            "Call this when the user mentions new information about a project's budget, timeline, or details. "
+            "You are ONLY proposing — the user will confirm or reject in the UI."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "opportunity_id": types.Schema(type="STRING", description="ID of the opportunity to update"),
+                "title": types.Schema(type="STRING", description="Title for display"),
+                "updates": types.Schema(
+                    type="OBJECT",
+                    description="Fields to update",
+                    properties={
+                        "summary": types.Schema(type="STRING", description="Updated summary"),
+                        "notes": types.Schema(type="STRING", description="Updated notes"),
+                        "expected_revenue_usd": types.Schema(type="NUMBER", description="Updated expected revenue"),
+                        "estimated_hours": types.Schema(type="NUMBER", description="Updated estimated hours"),
+                        "client": types.Schema(type="STRING", description="Updated client name"),
+                    },
+                ),
+            },
+            required=["opportunity_id", "title", "updates"],
+        ),
+    )
+    propose_postmortem_decl = types.FunctionDeclaration(
+        name="propose_postmortem",
+        description=(
+            "Propose creating a postmortem analysis for a closed opportunity. "
+            "Call this when the user discusses why a project was won, lost, or withdrawn. "
+            "You are ONLY proposing — the user will confirm or reject in the UI."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "opportunity_id": types.Schema(type="STRING", description="ID of the related opportunity"),
+                "title": types.Schema(type="STRING", description="Title for display"),
+                "outcome": types.Schema(type="STRING", description="Outcome: won, lost, withdrawn, no_response"),
+                "findings": types.Schema(type="STRING", description="Key findings and analysis"),
+                "what_worked": types.Schema(type="STRING", description="What went well"),
+                "root_causes": types.Schema(type="ARRAY", items=types.Schema(type="STRING"), description="Root causes if lost/withdrawn"),
+                "lessons": types.Schema(type="ARRAY", items=types.Schema(type="STRING"), description="Lessons learned"),
+            },
+            required=["opportunity_id", "title", "outcome", "findings"],
+        ),
+    )
+    propose_execution_project_decl = types.FunctionDeclaration(
+        name="propose_execution_project",
+        description=(
+            "Propose creating an execution/delivery tracking project from a won opportunity. "
+            "Call this when the user confirms winning a project and wants to start tracking milestones. "
+            "You are ONLY proposing — the user will confirm or reject in the UI."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "opportunity_id": types.Schema(type="STRING", description="ID of the won opportunity"),
+                "title": types.Schema(type="STRING", description="Project title"),
+                "client": types.Schema(type="STRING", description="Client name"),
+                "milestones": types.Schema(
+                    type="ARRAY",
+                    items=types.Schema(
+                        type="OBJECT",
+                        properties={
+                            "label": types.Schema(type="STRING", description="Milestone name"),
+                            "due_date": types.Schema(type="STRING", description="Due date ISO format"),
+                        },
+                    ),
+                    description="List of milestones",
+                ),
+                "planned_hours": types.Schema(type="NUMBER", description="Planned total hours"),
+                "planned_revenue_usd": types.Schema(type="NUMBER", description="Planned revenue in USD"),
+            },
+            required=["opportunity_id", "title"],
+        ),
+    )
+
+    generate_cover_letter_decl = types.FunctionDeclaration(
+        name="generate_cover_letter",
+        description=(
+            "Generate a cover letter or application text for a specific project based on job details. "
+            "Call this when the user explicitly asks you to write a cover letter. "
+            "This delegates the heavy lifting to a specialized Writer AI model."
+        ),
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "job_details": types.Schema(type="STRING", description="Details about the job, company, and any specific angle requested."),
+            },
+            required=["job_details"],
+        ),
+    )
+
+    all_draft_decls = [
+        propose_opportunity_decl,
+        propose_stage_update_decl,
+        propose_opportunity_update_decl,
+        propose_postmortem_decl,
+        propose_execution_project_decl,
+        generate_cover_letter_decl,
+    ]
+    return [types.Tool(function_declarations=all_draft_decls)]
+
+@app.post("/api/ops_agent/chat")
+async def ops_agent_chat(data: dict):
+    message = normalize_whitespace(str(data.get("message", "")))
+    history = data.get("history", [])
+
+    if not message:
+        raise HTTPException(status_code=400, detail="message is required")
+
+    writer_client = get_writer_client()
+    
+    ops_context = build_ops_context_summary()
+    ops_block = f"\n\n[OPS HUB DATA BACKGROUND]\n{ops_context}\n" if ops_context else ""
+
+    system_prompt = (
+        "You are the Ops Hub Mini-Agent. Your ONLY job is to maintain the database by creating or updating cards. "
+        "Analyze the user's request against the recent chat context and use your propose_ tools to create or update cards accordingly.\n"
+        "MANDATORY RULES:\n"
+        "1. You MUST call the appropriate propose_ function(s) to fulfill the user's request.\n"
+        "2. DO NOT just describe data in text — call the functions.\n"
+        "3. If the user tells you to revise a card, call the appropriate propose_* tool with the corrected values.\n"
+        f"{ops_block}"
+    )
+
+    # Format history nicely
+    history_lines = []
+    for msg in history:
+        role = msg.get('role', 'user')
+        text = msg.get('text', '')
+        if text:
+            history_lines.append(f"[{role}]: {text}")
+    history_text = "\n".join(history_lines[-15:])
+
+    prompt = (
+        f"{system_prompt}\n\n"
+        "--- RECENT CHAT CONTEXT ---\n"
+        f"{history_text}\n\n"
+        "--- USER REQUEST (YOUR CURRENT TASK) ---\n"
+        f"{message}"
+    )
+
+    draft_tools = get_all_draft_tools()
+
+    try:
+        response = writer_client.models.generate_content(
+            model=WRITER_MODEL,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0.2,
+                tools=draft_tools,
+            ),
+        )
+        
+        text_parts = []
+        tool_draft_parts = []
+        
+        try:
+            for part in response.candidates[0].content.parts:
+                if hasattr(part, 'function_call') and part.function_call:
+                    fc = part.function_call
+                    fn_name = fc.name
+                    fn_args = dict(fc.args) if fc.args else {}
+                    if fn_name.startswith("propose_"):
+                        tool_draft_parts.append({
+                            "type": "tool_draft",
+                            "tool": fn_name,
+                            "payload": fn_args,
+                        })
+                elif hasattr(part, 'text') and part.text:
+                    text_parts.append(part.text)
+        except Exception as e:
+            logger.warning("Error extracting ops agent response: %s", e)
+            text_parts = [response.text]
+
+        model_response_parts = list(text_parts)
+        for draft in tool_draft_parts:
+            model_response_parts.append(f"\n[TOOL_DRAFT]{json.dumps(draft, ensure_ascii=False)}[/TOOL_DRAFT]")
+
+        return {
+            "text": "\n".join(model_response_parts).strip()
+        }
+    except Exception as e:
+        error_id = log_exception("ops_agent_chat failed", e)
+        raise HTTPException(status_code=500, detail=to_user_error("Ops agent request failed", error_id))
 
 
 @app.post("/api/chat")
@@ -5078,12 +6089,33 @@ async def send_message(
         
         if tools:
             config_params["tools"] = tools
+
+        # Draft & Confirm tools
+        draft_tools = get_all_draft_tools()
+        if "tools" in config_params:
+            config_params["tools"].extend(draft_tools)
+        else:
+            config_params["tools"] = draft_tools
         
-        if system_instructions:
-            config_params["system_instruction"] = system_instructions
+        # Inject Ops Hub context into system instructions
+        ops_context = build_ops_context_summary()
+        enriched_system = system_instructions
+        if ops_context:
+            enriched_system = (enriched_system + "\n\n" + ops_context) if enriched_system else ops_context
+
+        if enriched_system:
+            config_params["system_instruction"] = enriched_system
             
         history_context = get_gemini_history(current_history)
         logger.info("Restoring chat session with %s historical messages", len(history_context))
+        
+        # Debug: log what tools are being sent
+        tool_count = 0
+        if "tools" in config_params:
+            for t in config_params["tools"]:
+                if hasattr(t, 'function_declarations') and t.function_declarations:
+                    tool_count += len(t.function_declarations)
+        logger.info("Creating chat session with config keys=%s, function_declarations=%d", list(config_params.keys()), tool_count)
         
         chat_session = client.chats.create(
             model=model,
@@ -5177,6 +6209,7 @@ async def send_message(
         # Extract thoughts and text from response parts
         thought_parts = []
         text_parts = []
+        tool_draft_parts = []
         
         try:
             # The genai SDK response has candidates[0].content.parts
@@ -5187,6 +6220,74 @@ async def send_message(
                 if hasattr(part, 'thought') and part.thought:
                     if part.text:
                         thought_parts.append(part.text)
+                elif hasattr(part, 'function_call') and part.function_call:
+                    # Draft & Confirm: intercept function calls — do NOT execute them.
+                    # Instead, package them as tool_draft blocks for the frontend.
+                    fc = part.function_call
+                    fn_name = fc.name if hasattr(fc, 'name') else str(fc.get('name', ''))
+                    fn_args = dict(fc.args) if hasattr(fc, 'args') and fc.args else {}
+                    if fn_name.startswith("propose_"):
+                        draft_payload = {
+                            "type": "tool_draft",
+                            "tool": fn_name,
+                            "payload": fn_args,
+                        }
+                        tool_draft_parts.append(draft_payload)
+                        logger.info("Intercepted Draft & Confirm call: %s with args %s", fn_name, fn_args)
+                    elif fn_name == "generate_cover_letter":
+                        logger.info("Intercepted generate_cover_letter. Delegating to Writer AI...")
+                        job_details = fn_args.get("job_details", "")
+                        
+                        try:
+                            writer_client = get_writer_client()
+                            packet = build_writer_packet(
+                                task="draft_cover_letter",
+                                token_budget=1000,
+                                latest_turns_count=5,
+                            )
+                            ops_context = build_ops_context_summary()
+                            ops_block = f"\n\n[OPS HUB DATA BACKGROUND]\n{ops_context}\n" if ops_context else ""
+                            
+                            writer_prompt = (
+                                "You are CoverLetterWriter. Your only responsibility is writing cover letters.\n"
+                                "Never invent facts. Use only the context packet.\n"
+                                f"{ops_block}"
+                                f"User instruction details:\n{job_details}\n\n"
+                                "Context packet (JSON):\n"
+                                f"{json.dumps(packet, ensure_ascii=False)}\n\n"
+                                "Output requirements:\n"
+                                "- Produce final cover letter text only.\n"
+                            )
+                            w_resp = writer_client.models.generate_content(
+                                model=WRITER_MODEL,
+                                contents=writer_prompt,
+                                config=types.GenerateContentConfig(temperature=0.4, max_output_tokens=2048)
+                            )
+                            w_text = extract_response_text(w_resp)
+                            
+                            if w_text:
+                                generated_text = f"\n[DELEGATED_TASK_COMPLETE]\n**Сгенерированное Cover Letter (Flash):**\n\n{w_text}\n[/DELEGATED_TASK_COMPLETE]\n"
+                                text_parts.append(generated_text)
+                                
+                                # Feed success back to main model
+                                second_response = chat_session.send_message(
+                                    [{"function_response": {"name": fn_name, "response": {"status": "success", "message": "Cover letter was generated and displayed to user."}}}]
+                                )
+                                for p in second_response.candidates[0].content.parts:
+                                    if hasattr(p, 'text') and p.text:
+                                        text_parts.append(p.text)
+                            else:
+                                raise ValueError("Empty response from Writer AI")
+                        except Exception as e:
+                            logger.error("Failed to generate cover letter: %s", e)
+                            err_resp = chat_session.send_message(
+                                [{"function_response": {"name": fn_name, "response": {"status": "error", "message": str(e)}}}]
+                            )
+                            for p in err_resp.candidates[0].content.parts:
+                                if hasattr(p, 'text') and p.text:
+                                    text_parts.append(p.text)
+                    else:
+                        logger.warning("Unknown function_call: %s — ignoring", fn_name)
                 elif hasattr(part, 'text') and part.text:
                     # Double check if the text itself looks like a thought (fallback) or if it's just text
                     text_parts.append(part.text)
@@ -5204,9 +6305,33 @@ async def send_message(
         # but with thinking=High/Medium, it should be in thought_parts.
         
         model_response_parts.extend(text_parts)
+
+        # Draft & Confirm: embed tool_draft payloads as tagged JSON blocks
+        for draft in tool_draft_parts:
+            model_response_parts.append(f"\n[TOOL_DRAFT]{json.dumps(draft, ensure_ascii=False)}[/TOOL_DRAFT]")
+
         model_response_text = "\n".join(model_response_parts)
         
-        logger.info("Response has %s thought parts and %s text parts", len(thought_parts), len(text_parts))
+        logger.info("Response has %s thought parts, %s text parts, %s tool_draft parts", len(thought_parts), len(text_parts), len(tool_draft_parts))
+        
+        # Intercept execution brief 
+        brief_match = re.search(r"\[EXECUTION_BRIEF\](.*?)\[/EXECUTION_BRIEF\]", model_response_text, re.DOTALL)
+        if brief_match:
+            brief_content = brief_match.group(1).strip()
+            # Find project ID if explicitly provided inside the brief
+            project_id_match = re.search(r"Project_ID:\s*([a-zA-Z0-9_\-]+)", brief_content, re.IGNORECASE)
+            project_id = project_id_match.group(1) if project_id_match else "default"
+            
+            project_dir = os.path.join(WORKSPACE_DIR, project_id)
+            os.makedirs(project_dir, exist_ok=True)
+            brief_path = os.path.join(project_dir, "task_brief.md")
+            
+            try:
+                with open(brief_path, "w", encoding="utf-8") as bf:
+                    bf.write(f"# Execution Brief\nGenerated at: {now_iso()}\n\n{brief_content}")
+                logger.info("Saved execution brief to %s", brief_path)
+            except Exception as e:
+                logger.error("Failed to save execution brief: %s", e)
         
         # Update local history (with full URLs for the UI)
         ui_attachments = []
@@ -5303,6 +6428,18 @@ async def send_message(
     except HTTPException:
         raise
     except Exception as e:
+        error_msg = str(e)
+        # Graceful handling of known Gemini API errors
+        if "404 NOT_FOUND" in error_msg and "models/" in error_msg:
+            logger.warning("Model not found: %s", error_msg)
+            raise HTTPException(status_code=400, detail="Выбранная модель не найдена или недоступна. Выберите другую модель в настройках.")
+        if "RESOURCE_EXHAUSTED" in error_msg or "429" in error_msg:
+            logger.warning("Rate limit hit: %s", error_msg)
+            raise HTTPException(status_code=429, detail="Лимит запросов к Gemini API исчерпан. Подождите минуту и попробуйте снова.")
+        if "SERVICE_UNAVAILABLE" in error_msg or "503" in error_msg:
+            logger.warning("Gemini API unavailable: %s", error_msg)
+            raise HTTPException(status_code=503, detail="Gemini API временно недоступен. Попробуйте через несколько минут.")
+            
         error_id = log_exception("send_message failed", e)
         raise HTTPException(status_code=500, detail=to_user_error("Chat request failed", error_id))
 
@@ -5310,4 +6447,3 @@ async def send_message(
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-

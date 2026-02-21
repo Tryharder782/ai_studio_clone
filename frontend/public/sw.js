@@ -1,4 +1,4 @@
-const CACHE_NAME = 'work-boost-os-v1'
+const CACHE_NAME = 'work-boost-os-v2'
 const OFFLINE_ASSETS = ['/', '/manifest.webmanifest', '/icons/icon-192.png', '/icons/icon-512.png']
 
 self.addEventListener('install', event => {
@@ -25,6 +25,8 @@ self.addEventListener('fetch', event => {
   // API never cache: always live state.
   if (url.pathname.startsWith('/api/')) return
   if (url.pathname.startsWith('/ws')) return
+  if (url.pathname.startsWith('/src/')) return
+  if (url.pathname.includes('@vite')) return
 
   event.respondWith(
     caches.match(request).then(cached => {

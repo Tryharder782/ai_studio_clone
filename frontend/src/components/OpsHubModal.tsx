@@ -6,6 +6,8 @@ interface OpsHubModalProps {
   apiBase: string
   onError: (message: string) => void
   embedded?: boolean
+  lockTab?: OpsTab
+  compact?: boolean
 }
 
 type OpsTab = 'pipeline' | 'decisions' | 'postmortem' | 'playbooks' | 'delivery' | 'settings'
@@ -493,12 +495,18 @@ const playbookFeedbackBadgeClass = (label?: PlaybookUsageEvent['feedback_label']
   return 'border-zinc-800 bg-zinc-950 text-zinc-500'
 }
 
-export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError, embedded = false }: OpsHubModalProps) {
-  const [tab, setTab] = useState<OpsTab>('pipeline')
+export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError, embedded = false, lockTab, compact = false }: OpsHubModalProps) {
+  const [tab, setTab] = useState<OpsTab>(lockTab || 'pipeline')
   const [data, setData] = useState<OpsData | null>(null)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
   const [backupBusy, setBackupBusy] = useState(false)
+  const [importBusy, setImportBusy] = useState(false)
+  const [postprocessBusy, setPostprocessBusy] = useState(false)
+  const [importHistoryPath, setImportHistoryPath] = useState('Работа над собой 3.json')
+  const [importMaxItems, setImportMaxItems] = useState('120')
+  const [importReport, setImportReport] = useState('')
+  const [postprocessReport, setPostprocessReport] = useState('')
   const [proposalBusy, setProposalBusy] = useState(false)
   const [proposalUseAiDraft, setProposalUseAiDraft] = useState(true)
   const [proposalPack, setProposalPack] = useState<ProposalPack | null>(null)
@@ -756,6 +764,10 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [embedded, isOpen])
 
+  useEffect(() => {
+    if (lockTab) setTab(lockTab)
+  }, [lockTab])
+
   const closedOps = useMemo(() => (data?.opportunities || []).filter(item => item.stage === 'won' || item.stage === 'lost'), [data])
   const wonOps = useMemo(() => (data?.opportunities || []).filter(item => item.stage === 'won'), [data])
   const pipelineBoard = useMemo(() => {
@@ -842,6 +854,102 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
       onError('')
     } catch {
       onError('Network error while opening backup directory.')
+    }
+  }
+
+  const importFromHistory = async () => {
+    setImportBusy(true)
+    setImportReport('')
+    try {
+      const res = await fetch(`${apiBase}/api/ops/opportunity/import_history`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          history_file_path: importHistoryPath,
+          max_items: importMaxItems,
+        }),
+      })
+      const payload = (await res.json().catch(() => null)) as {
+        payload?: OpsData
+        import_report?: {
+          history_file?: string
+          messages_total?: number
+          candidates_seen?: number
+          created?: number
+          skipped?: number
+          skipped_reasons?: Record<string, number>
+        }
+        detail?: string
+      } | null
+
+      if (!res.ok || !payload) {
+        onError(toErrorMessage(payload, 'Failed to import opportunities from history'))
+        return
+      }
+
+      if (payload.payload) {
+        applyData(payload.payload)
+      } else {
+        await fetchOps()
+      }
+
+      const report = payload.import_report
+      if (report) {
+        const compact = `Импорт: создано ${report.created ?? 0}, кандидатов ${report.candidates_seen ?? 0}, пропущено ${report.skipped ?? 0}.`
+        setImportReport(compact)
+        onError(compact)
+      } else {
+        onError('Импорт завершен.')
+      }
+    } catch {
+      onError('Network error while importing opportunities from history.')
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  const postprocessImported = async () => {
+    setPostprocessBusy(true)
+    setPostprocessReport('')
+    try {
+      const res = await fetch(`${apiBase}/api/ops/opportunity/postprocess_imported`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const payload = (await res.json().catch(() => null)) as {
+        payload?: OpsData
+        postprocess_report?: {
+          imported_seen?: number
+          renamed?: number
+          merged?: number
+          removed_duplicates?: number
+          final_total?: number
+        }
+      } | null
+      if (!res.ok || !payload) {
+        onError(toErrorMessage(payload, 'Failed to postprocess imported opportunities'))
+        return
+      }
+
+      if (payload.payload) {
+        applyData(payload.payload)
+      } else {
+        await fetchOps()
+      }
+
+      const report = payload.postprocess_report
+      if (report) {
+        const compact = `Постобработка: переименовано ${report.renamed ?? 0}, дублей объединено ${report.merged ?? 0}.`
+        setPostprocessReport(compact)
+        onError(compact)
+      } else {
+        onError('Постобработка завершена.')
+      }
+    } catch {
+      onError('Network error while postprocessing imported opportunities.')
+    } finally {
+      setPostprocessBusy(false)
     }
   }
 
@@ -1392,6 +1500,7 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
             </div>
           </div>
         </header>
+        {!compact && (
         <div className="p-4 border-b border-zinc-800 bg-zinc-950/70">
           <div className="grid grid-cols-2 lg:grid-cols-6 gap-3">
             <div className="rounded-xl border border-zinc-800 bg-zinc-900/80 p-3">
@@ -1435,7 +1544,9 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
             </div>
           </div>
         </div>
+        )}
 
+        {!compact && !lockTab && (
         <div className="px-4 pt-3 border-b border-zinc-800 bg-zinc-950">
           <div className="inline-flex rounded-lg border border-zinc-800 bg-zinc-900 p-1 gap-1">
             <button onClick={() => setTab('pipeline')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md ${tab === 'pipeline' ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-300 hover:bg-zinc-800'}`}>Воронка</button>
@@ -1446,6 +1557,7 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
             <button onClick={() => setTab('settings')} className={`px-3 py-1.5 text-xs md:text-sm rounded-md ${tab === 'settings' ? 'bg-zinc-100 text-zinc-900' : 'text-zinc-300 hover:bg-zinc-800'}`}>Настройки</button>
           </div>
         </div>
+        )}
 
         <div className="flex-1 overflow-auto p-4">
           {loading && (
@@ -2273,6 +2385,55 @@ export default function OpsHubModal({ isOpen = false, onClose, apiBase, onError,
                       {backupBusy ? 'Создание...' : 'Создать Бэкап'}
                     </button>
                   </div>
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-zinc-800 bg-zinc-900/60 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-sm font-medium">Импорт заказов из чата</h3>
+                    <div className="text-xs text-zinc-500 mt-1">
+                      Автосоздание opportunities из истории. Для твоего кейса по умолчанию используется `Работа над собой 3.json`.
+                    </div>
+                    {importReport && <div className="text-[11px] text-emerald-300 mt-2">{importReport}</div>}
+                    {postprocessReport && <div className="text-[11px] text-blue-300 mt-1">{postprocessReport}</div>}
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={postprocessImported}
+                      disabled={postprocessBusy}
+                      className="h-8 px-3 rounded-md border border-zinc-700 bg-zinc-900 text-zinc-200 hover:bg-zinc-800 text-xs disabled:opacity-60"
+                    >
+                      {postprocessBusy ? 'Обрабатываю...' : 'Постобработка импорта'}
+                    </button>
+                    <button
+                      onClick={importFromHistory}
+                      disabled={importBusy}
+                      className="h-8 px-3 rounded-md border border-zinc-700 bg-zinc-100 text-zinc-900 hover:bg-white text-xs disabled:opacity-60"
+                    >
+                      {importBusy ? 'Импортирую...' : 'Импортировать в Воронку'}
+                    </button>
+                  </div>
+                </div>
+                <div className="mt-3 grid grid-cols-1 md:grid-cols-2 gap-2">
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] text-zinc-400">Файл истории</span>
+                    <input
+                      value={importHistoryPath}
+                      onChange={e => setImportHistoryPath(e.target.value)}
+                      placeholder="Работа над собой 3.json"
+                      className="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs outline-none focus:border-zinc-500"
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1">
+                    <span className="text-[11px] text-zinc-400">Лимит карточек за импорт</span>
+                    <input
+                      value={importMaxItems}
+                      onChange={e => setImportMaxItems(e.target.value)}
+                      placeholder="120"
+                      className="h-9 rounded-md border border-zinc-700 bg-zinc-950 px-3 text-xs outline-none focus:border-zinc-500"
+                    />
+                  </label>
                 </div>
               </div>
 

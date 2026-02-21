@@ -4,6 +4,11 @@ import ThoughtProcess from './ThoughtProcess.tsx'
 import AttachmentCard from './AttachmentCard.tsx'
 import LightboxPreview from './LightboxPreview.tsx'
 import MessageAttachment from './MessageAttachment.tsx'
+import DraftOpportunityCard from './DraftOpportunityCard.tsx'
+import DraftStageUpdateCard from './DraftStageUpdateCard.tsx'
+import DraftOpportunityUpdateCard from './DraftOpportunityUpdateCard.tsx'
+import DraftPostmortemCard from './DraftPostmortemCard.tsx'
+import DraftExecutionProjectCard from './DraftExecutionProjectCard.tsx'
 import ReactMarkdown from 'react-markdown'
 
 interface ChatProps {
@@ -15,6 +20,7 @@ interface ChatProps {
   onLoadMore: () => void
   hasMore: boolean
   missingApiKey?: boolean
+  apiBase?: string
 }
 
 export default function ChatInterface({
@@ -26,6 +32,7 @@ export default function ChatInterface({
   onLoadMore,
   hasMore,
   missingApiKey = false,
+  apiBase,
 }: ChatProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
@@ -33,6 +40,38 @@ export default function ChatInterface({
   const [attachments, setAttachments] = useState<File[]>([])
   const [previewData, setPreviewData] = useState<{ name: string; type: string; url: string; size: number } | null>(null)
   const [isDragging, setIsDragging] = useState(false)
+  const [executorStatus, setExecutorStatus] = useState<'idle' | 'working' | 'report_ready'>('idle')
+
+  React.useEffect(() => {
+    if (!apiBase || !historyLoaded) return
+    let isMounted = true
+
+    const checkStatus = async () => {
+      try {
+        const res = await fetch(`${apiBase}/api/workspace/status?project_id=default`)
+        if (!res.ok) return
+        const data = await res.json()
+        if (isMounted) {
+          if (data.status === 'report_ready') {
+            setExecutorStatus('report_ready')
+          } else if (data.status === 'working') {
+            setExecutorStatus('working')
+          } else {
+            setExecutorStatus('idle')
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    checkStatus()
+    const interval = setInterval(checkStatus, 3000)
+    return () => {
+      isMounted = false
+      clearInterval(interval)
+    }
+  }, [apiBase, historyLoaded])
 
   const handleScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const target = e.currentTarget
@@ -142,46 +181,99 @@ export default function ChatInterface({
             {msg.role === 'model' && (
               <div className="w-8 h-8 rounded-full bg-gradient-to-br from-blue-400 to-purple-500 flex-shrink-0" />
             )}
-            <div className={`max-w-[85%] md:max-w-[80%] ${msg.role === 'user' ? 'bg-[#28292A] rounded-2xl rounded-tr-sm p-4' : ''}`}>
-              {msg.attachments && msg.attachments.length > 0 && (
-                <div className="flex flex-col gap-3 mb-3">
-                  {msg.attachments.map((att, attIdx) => (
-                    <MessageAttachment
-                      key={attIdx}
-                      name={att.name}
-                      type={att.type}
-                      size={att.size}
-                      url={att.url}
-                      onClick={() => setPreviewData(att)}
-                    />
-                  ))}
-                </div>
-              )}
+            <div className={`group/msg flex flex-col ${msg.role === 'user' ? 'items-end' : 'items-start'} max-w-[85%] md:max-w-[80%]`}>
+              <div className={`w-full ${msg.role === 'user' ? 'bg-[#28292A] rounded-2xl rounded-tr-sm p-4' : ''}`}>
+                {msg.attachments && msg.attachments.length > 0 && (
+                  <div className="flex flex-col gap-3 mb-3">
+                    {msg.attachments.map((att, attIdx) => (
+                      <MessageAttachment
+                        key={attIdx}
+                        name={att.name}
+                        type={att.type}
+                        size={att.size}
+                        url={att.url}
+                        onClick={() => setPreviewData(att)}
+                      />
+                    ))}
+                  </div>
+                )}
 
-              {msg.parts.join('').trim() && (
-                <div
-                  className="prose prose-invert prose-sm max-w-none text-left leading-snug
-                    break-words whitespace-pre-wrap
-                    prose-blockquote:border-l-2 prose-blockquote:border-gray-500 prose-blockquote:pl-4 prose-blockquote:my-1 prose-blockquote:not-italic
-                    prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0.5 prose-p:pl-4 prose-p:-indent-4
-                    prose-strong:font-bold prose-strong:text-white"
-                  style={{ wordBreak: 'normal', overflowWrap: 'anywhere' }}
+                {(() => {
+                  const fullText = msg.parts.join('')
+                  // Extract TOOL_DRAFT blocks
+                  const toolDraftRegex = /\[TOOL_DRAFT\](.*?)\[\/TOOL_DRAFT\]/gs
+                  const drafts: Array<{ type: string; tool: string; payload: Record<string, unknown> }> = []
+                  let match: RegExpExecArray | null
+                  while ((match = toolDraftRegex.exec(fullText)) !== null) {
+                    try {
+                      drafts.push(JSON.parse(match[1]))
+                    } catch { /* skip malformed */ }
+                  }
+                  // Strip TOOL_DRAFT blocks from text for normal rendering
+                  const cleanText = fullText.replace(toolDraftRegex, '').trim()
+                  return (
+                    <>
+                      {cleanText && (
+                        <div
+                          className="prose prose-invert prose-sm max-w-none text-left leading-snug
+                          break-words whitespace-pre-wrap
+                          prose-blockquote:border-l-2 prose-blockquote:border-gray-500 prose-blockquote:pl-4 prose-blockquote:my-1 prose-blockquote:not-italic
+                          prose-p:my-1.5 prose-ul:my-1.5 prose-li:my-0.5 prose-p:pl-4 prose-p:-indent-4
+                          prose-strong:font-bold prose-strong:text-white"
+                          style={{ wordBreak: 'normal', overflowWrap: 'anywhere' }}
+                        >
+                          {cleanText.split('[THOUGHT_BLOCK]').map((segment, sIdx) => {
+                            if (segment.includes('[/THOUGHT_BLOCK]')) {
+                              const [thought, ...rest] = segment.split('[/THOUGHT_BLOCK]')
+                              const response = rest.join('')
+                              return (
+                                <React.Fragment key={sIdx}>
+                                  <ThoughtProcess content={thought} />
+                                  <ReactMarkdown>{response}</ReactMarkdown>
+                                </React.Fragment>
+                              )
+                            }
+                            if (!segment.trim()) return null
+                            return <ReactMarkdown key={sIdx}>{segment}</ReactMarkdown>
+                          })}
+                        </div>
+                      )}
+                      {drafts.map((draft, dIdx) => {
+                        const base = apiBase || ''
+                        const handleRevision = (text: string) => onSend(text, [])
+                        if (draft.tool === 'propose_opportunity') {
+                          return <DraftOpportunityCard key={`draft-${dIdx}`} payload={draft.payload as never} apiBase={base} onRequestRevision={handleRevision} />
+                        }
+                        if (draft.tool === 'propose_stage_update') {
+                          return <DraftStageUpdateCard key={`draft-${dIdx}`} payload={draft.payload as never} apiBase={base} onRequestRevision={handleRevision} />
+                        }
+                        if (draft.tool === 'propose_opportunity_update') {
+                          return <DraftOpportunityUpdateCard key={`draft-${dIdx}`} payload={draft.payload as never} apiBase={base} onRequestRevision={handleRevision} />
+                        }
+                        if (draft.tool === 'propose_postmortem') {
+                          return <DraftPostmortemCard key={`draft-${dIdx}`} payload={draft.payload as never} apiBase={base} onRequestRevision={handleRevision} />
+                        }
+                        if (draft.tool === 'propose_execution_project') {
+                          return <DraftExecutionProjectCard key={`draft-${dIdx}`} payload={draft.payload as never} apiBase={base} onRequestRevision={handleRevision} />
+                        }
+                        return null
+                      })}
+                    </>
+                  )
+                })()}
+              </div>
+              {msg.role === 'user' && (
+                <button
+                  onClick={() => onSend(msg.parts.join('').trim(), [])}
+                  disabled={isLoading}
+                  title="Try again"
+                  className="mt-1 opacity-0 group-hover/msg:opacity-100 transition-opacity h-6 w-6 flex items-center justify-center rounded-full text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800 disabled:opacity-30"
                 >
-                  {msg.parts.join('').split('[THOUGHT_BLOCK]').map((segment, sIdx) => {
-                    if (segment.includes('[/THOUGHT_BLOCK]')) {
-                      const [thought, ...rest] = segment.split('[/THOUGHT_BLOCK]')
-                      const response = rest.join('')
-                      return (
-                        <React.Fragment key={sIdx}>
-                          <ThoughtProcess content={thought} />
-                          <ReactMarkdown>{response}</ReactMarkdown>
-                        </React.Fragment>
-                      )
-                    }
-                    if (!segment.trim()) return null
-                    return <ReactMarkdown key={sIdx}>{segment}</ReactMarkdown>
-                  })}
-                </div>
+                  <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+                    <path d="M3 3v5h5" />
+                  </svg>
+                </button>
               )}
             </div>
           </div>
@@ -193,6 +285,23 @@ export default function ChatInterface({
           </div>
         )}
       </div>
+
+      {executorStatus !== 'idle' && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 flex items-center gap-2 rounded-full border border-indigo-500/30 bg-indigo-500/10 px-4 py-2 text-sm text-indigo-300 backdrop-blur-md shadow-lg">
+          {executorStatus === 'working' && (
+            <>
+              <div className="h-2 w-2 animate-pulse rounded-full bg-indigo-400" />
+              <span>Executor is working...</span>
+            </>
+          )}
+          {executorStatus === 'report_ready' && (
+            <>
+              <div className="h-2 w-2 rounded-full bg-emerald-400" />
+              <span className="text-emerald-300">Execution Report Ready</span>
+            </>
+          )}
+        </div>
+      )}
 
       <div
         className="p-3 md:p-4 bg-[#131314] relative pb-safe"

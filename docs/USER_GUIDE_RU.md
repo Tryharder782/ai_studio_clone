@@ -205,7 +205,7 @@ GOOGLE_API_KEY=your_google_ai_studio_api_key_here
 
 1. `Название вакансии`.
 2. `Клиент`.
-3. `Стадия` (`discovery|qualified|proposal|interview|negotiation|won|lost`).
+3. `Стадия` (`discovery|qualified|proposal|interview|negotiation|waiting_offer|offer_received|blocked|active|won|upsell|lost`).
 4. `URL вакансии`.
 5. `Ожидаемая выручка (USD)`.
 6. `Оценка часов`.
@@ -218,6 +218,7 @@ GOOGLE_API_KEY=your_google_ai_studio_api_key_here
 
 1. `Добавить opportunity` / `Обновить opportunity`.
 2. `Отмена редактирования` (если редактирование).
+3. `Внести правки` (только для AI-черновиков) — отправляет текстовый запрос агенту на изменение карточки-черновика.
 
 ### 5.2.2. Автозаполнение opportunity
 
@@ -784,6 +785,20 @@ GOOGLE_API_KEY=your_google_ai_studio_api_key_here
 2. Обновляет историю, скачивает вложения.
 3. После успеха — авто reload UI.
 
+## 6.10. Ops Mini Agent
+
+Компонент: `OpsMiniAgent.tsx`.
+
+Цель:
+1. Выполнение операционных задач в фоне без переключения основного ИИ-Стратега на рутину (используется дешёвая и быстрая модель).
+2. Анализ истории чата и автоматическое выполнение действий (изменение стадии карточки, обновление бюджета, перенос в архив и т.д.).
+
+Логика:
+1. Открывается кнопкой `Открыть Ops Agent` из Sidebar.
+2. Вводится инструкция-задание (например: «Обнови бюджет в последней карточке до $500»).
+3. Имеет независимый ползунок размера контекста (количества последних анализируемых сообщений).
+4. Результат выполнения выводится в основной чат интерфейса как сообщение от агента.
+
 ---
 
 ## 7. Cover Writer (mini окно)
@@ -838,6 +853,13 @@ GOOGLE_API_KEY=your_google_ai_studio_api_key_here
 Результат:
 
 1. Markdown-рендер готового текста.
+
+## 7.4. Автоматическое делегирование (Writer Handoff)
+
+Если Стратег решает сгенерировать Cover Letter по просьбе пользователя прямо в главном чате:
+1. Стратег вызывает tool `generate_cover_letter`.
+2. Система перехватывает вызов и делегирует его Cover Writer в фоне.
+3. Writer-модель генерирует письмо, и оно автоматически отображается в потоке чата.
 
 ---
 
@@ -1201,8 +1223,13 @@ Backend нормализует через split + trim + dedupe.
    3. `proposal`.
    4. `interview`.
    5. `negotiation`.
-   6. `won`.
-   7. `lost`.
+   6. `waiting_offer`.
+   7. `offer_received`.
+   8. `blocked`.
+   9. `active`.
+   10. `won`.
+   11. `upsell`.
+   12. `lost`.
 2. Decision statuses:
    1. `active`.
    2. `validated`.
