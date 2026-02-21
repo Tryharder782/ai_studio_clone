@@ -6056,6 +6056,7 @@ async def send_message(
     system_instructions: str = Form(""),
     google_search: str = Form("false"),
     code_execution: str = Form("false"),
+    chat_context_limit: int = Form(0),
     client_id: str = Form("")
 ):
     global client, chat_session, current_history, total_tokens, current_file_path, current_model_name, current_google_search, current_code_execution, current_system_instructions, memory_dirty
@@ -6069,12 +6070,17 @@ async def send_message(
     tools_changed = (current_google_search != google_search or current_code_execution != code_execution)
     system_changed = (current_system_instructions != system_instructions)
     
-    if not chat_session or current_model_name != model or tools_changed or system_changed:
+    # If a chat history limit is active, we MUST recreate the session every turn
+    # because the SDK's internal ChatSession.history accumulates indefinitely otherwise.
+    force_recreate = (chat_context_limit > 0)
+    
+    if not chat_session or current_model_name != model or tools_changed or system_changed or force_recreate:
         logger.info(
-            "Creating new chat session for %s (tools_changed=%s, system_changed=%s)",
+            "Creating new chat session for %s (tools_changed=%s, system_changed=%s, force_recreate=%s)",
             model,
             tools_changed,
             system_changed,
+            force_recreate
         )
         
         # Build config for chat creation
@@ -6106,8 +6112,9 @@ async def send_message(
         if enriched_system:
             config_params["system_instruction"] = enriched_system
             
-        history_context = get_gemini_history(current_history)
-        logger.info("Restoring chat session with %s historical messages", len(history_context))
+        history_to_send = current_history[-chat_context_limit:] if chat_context_limit > 0 else current_history
+        history_context = get_gemini_history(history_to_send)
+        logger.info("Restoring chat session with %s historical messages (limit: %s)", len(history_context), chat_context_limit)
         
         # Debug: log what tools are being sent
         tool_count = 0

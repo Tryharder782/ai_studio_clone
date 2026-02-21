@@ -21,6 +21,8 @@ interface SidebarProps {
   setModel: (v: string) => void
   mediaResolution: string
   setMediaResolution: (v: string) => void
+  chatContextLimit: number
+  setChatContextLimit: (v: number) => void
   systemInstructions: string
   setSystemInstructions: (v: string) => void
   googleSearchEnabled: boolean
@@ -47,6 +49,8 @@ export default function Sidebar({
   setModel,
   mediaResolution,
   setMediaResolution,
+  chatContextLimit,
+  setChatContextLimit,
   systemInstructions,
   setSystemInstructions,
   googleSearchEnabled,
@@ -197,7 +201,25 @@ export default function Sidebar({
           </select>
         </div>
 
-        <div className="flex flex-col gap-2">
+        <div className="flex flex-col gap-3 pt-1">
+          <div className="flex justify-between items-center text-sm font-medium">
+            <span className="text-gray-300" title="Сколько последних сообщений отправлять в API контекст">Глубина истории чата</span>
+            <div className="w-12 h-7 bg-[#28292A] rounded-lg border border-[#333] flex items-center justify-center text-xs text-gray-400">
+              {chatContextLimit === 0 ? 'Все' : chatContextLimit}
+            </div>
+          </div>
+          <input
+            type="range"
+            min="0"
+            max="50"
+            step="1"
+            value={chatContextLimit}
+            onChange={e => setChatContextLimit(parseInt(e.target.value, 10))}
+            className="w-full accent-[#A8C7FA] h-1.5 bg-[#28292A] rounded-lg appearance-none cursor-pointer"
+          />
+        </div>
+
+        <div className="flex flex-col gap-2 pt-1">
           <span className="text-sm font-medium text-gray-300">Глубина мышления</span>
           <select
             value={thinkingLevel}

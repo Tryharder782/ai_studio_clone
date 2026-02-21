@@ -122,10 +122,15 @@ function App() {
   const [googleSearchEnabled, setGoogleSearchEnabled] = useState(false)
   const [codeExecutionEnabled, setCodeExecutionEnabled] = useState(false)
   const [systemInstructions, setSystemInstructions] = useState(() => localStorage.getItem('ai_studio_system_instructions') || '')
+  const [chatContextLimit, setChatContextLimit] = useState(() => parseInt(localStorage.getItem('ai_studio_chat_context_limit') || '10', 10))
 
   useEffect(() => {
     localStorage.setItem('ai_studio_system_instructions', systemInstructions)
   }, [systemInstructions])
+
+  useEffect(() => {
+    localStorage.setItem('ai_studio_chat_context_limit', chatContextLimit.toString())
+  }, [chatContextLimit])
 
   const wsBase = useMemo(() => resolveWsBase(apiBase), [apiBase])
 
@@ -309,6 +314,7 @@ function App() {
     formData.append('system_instructions', systemInstructions)
     formData.append('google_search', googleSearchEnabled.toString())
     formData.append('code_execution', codeExecutionEnabled.toString())
+    formData.append('chat_context_limit', chatContextLimit.toString())
     formData.append('client_id', clientIdRef.current)
 
     files.forEach(file => {
@@ -550,6 +556,8 @@ function App() {
                   setMediaResolution={setMediaResolution}
                   systemInstructions={systemInstructions}
                   setSystemInstructions={setSystemInstructions}
+                  chatContextLimit={chatContextLimit}
+                  setChatContextLimit={setChatContextLimit}
                   googleSearchEnabled={googleSearchEnabled}
                   setGoogleSearchEnabled={setGoogleSearchEnabled}
                   codeExecutionEnabled={codeExecutionEnabled}
@@ -594,6 +602,8 @@ function App() {
                 setMediaResolution={setMediaResolution}
                 systemInstructions={systemInstructions}
                 setSystemInstructions={setSystemInstructions}
+                chatContextLimit={chatContextLimit}
+                setChatContextLimit={setChatContextLimit}
                 googleSearchEnabled={googleSearchEnabled}
                 setGoogleSearchEnabled={setGoogleSearchEnabled}
                 codeExecutionEnabled={codeExecutionEnabled}
